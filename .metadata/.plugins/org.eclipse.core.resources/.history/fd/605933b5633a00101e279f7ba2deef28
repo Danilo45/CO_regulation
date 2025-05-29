@@ -1,0 +1,13 @@
+/*
+ * bme280.h
+ *
+ *  Created on: May 26, 2025
+ *      Author: danilo
+ */
+
+#ifndef SRC_BME280_H_
+#define SRC_BME280_H_
+
+
+
+#endif /* SRC_BME280_H_ */

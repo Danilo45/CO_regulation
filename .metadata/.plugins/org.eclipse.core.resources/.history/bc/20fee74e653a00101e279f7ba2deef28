@@ -1,0 +1,36 @@
+/*
+ * bme280_port.c
+ *
+ *  Created on: May 26, 2025
+ *      Author: danilo
+ */
+
+
+#include "bme280.h"
+#include "stm32f4xx_hal.h"
+
+extern SPI_HandleTypeDef hspi3; // koristi SPI3 ako si njega povezao
+#define BME280_CS_PORT GPIOC
+#define BME280_CS_PIN  GPIO_PIN_4
+
+int8_t user_spi_read(uint8_t reg_addr, uint8_t *data, uint32_t len, void *intf_ptr) {
+    reg_addr |= 0x80;  // Set MSB for SPI read (datasheet)
+    HAL_GPIO_WritePin(BME280_CS_PORT, BME280_CS_PIN, GPIO_PIN_RESET);
+    HAL_SPI_Transmit(&hspi3, &reg_addr, 1, HAL_MAX_DELAY);
+    HAL_SPI_Receive(&hspi3, data, len, HAL_MAX_DELAY);
+    HAL_GPIO_WritePin(BME280_CS_PORT, BME280_CS_PIN, GPIO_PIN_SET);
+    return 0;
+}
+
+int8_t user_spi_write(uint8_t reg_addr, const uint8_t *data, uint32_t len, void *intf_ptr) {
+    reg_addr &= 0x7F;  // Clear MSB for SPI write (datasheet)
+    HAL_GPIO_WritePin(BME280_CS_PORT, BME280_CS_PIN, GPIO_PIN_RESET);
+    HAL_SPI_Transmit(&hspi3, &reg_addr, 1, HAL_MAX_DELAY);
+    HAL_SPI_Transmit(&hspi3, (uint8_t*)data, len, HAL_MAX_DELAY);
+    HAL_GPIO_WritePin(BME280_CS_PORT, BME280_CS_PIN, GPIO_PIN_SET);
+    return 0;
+}
+
+void user_delay_ms(uint32_t period) {
+    HAL_Delay(period);
+}

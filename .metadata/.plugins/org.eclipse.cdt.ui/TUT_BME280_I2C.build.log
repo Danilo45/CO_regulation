@@ -1,0 +1,10 @@
+09:48:43 **** Incremental Build of configuration Debug for project TUT_BME280_I2C ****
+make -j8 all 
+arm-none-eabi-size  TUT_BME280_I2C.elf 
+   text	   data	    bss	    dec	    hex	filename
+  14984	     20	   1724	  16728	   4158	TUT_BME280_I2C.elf
+Finished building: default.size.stdout
+ 
+
+09:48:43 Build Finished. 0 errors, 0 warnings. (took 321ms)
+

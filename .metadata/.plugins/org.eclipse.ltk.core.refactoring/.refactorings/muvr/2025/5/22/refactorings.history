@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">
+<refactoring comment="Rename resource &apos;muvr/Core/Src/BME280.c&apos; to &apos;BME280_STM32.c&apos;" description="Rename resource &apos;BME280.c&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="Core/Src/BME280.c" name="BME280_STM32.c" stamp="1748332913572" updateReferences="true"/>
+</session>

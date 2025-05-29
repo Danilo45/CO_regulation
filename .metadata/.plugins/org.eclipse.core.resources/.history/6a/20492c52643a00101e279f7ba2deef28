@@ -1,0 +1,13 @@
+/*
+ * bme280_defs.h
+ *
+ *  Created on: May 26, 2025
+ *      Author: danilo
+ */
+
+#ifndef INC_BME280_DEFS_H_
+#define INC_BME280_DEFS_H_
+
+
+
+#endif /* INC_BME280_DEFS_H_ */
