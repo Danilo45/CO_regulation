@@ -37,7 +37,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define UART_TX_BUF_SIZE 256
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,7 +47,6 @@
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
-DMA_HandleTypeDef hdma_adc1;
 
 I2C_HandleTypeDef hi2c3;
 
@@ -55,6 +54,7 @@ TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart2_tx;
 
 /* Definitions for CoMeasureTask */
 osThreadId_t CoMeasureTaskHandle;
@@ -135,6 +135,11 @@ osMutexId_t xUARTMutexHandle;
 const osMutexAttr_t xUARTMutex_attributes = {
   .name = "xUARTMutex"
 };
+/* Definitions for xFANMutex */
+osMutexId_t xFANMutexHandle;
+const osMutexAttr_t xFANMutex_attributes = {
+  .name = "xFANMutex"
+};
 /* Definitions for xSpeakerSem */
 osSemaphoreId_t xSpeakerSemHandle;
 const osSemaphoreAttr_t xSpeakerSem_attributes = {
@@ -143,10 +148,17 @@ const osSemaphoreAttr_t xSpeakerSem_attributes = {
 /* USER CODE BEGIN PV */
 float Temperature, Pressure, Humidity;
 WeatherData_t data;
-uint32_t adc_value = 0;
 uint8_t rx_buff = 0;
 volatile uint8_t fan_continuous_mode = 0;
 
+
+static uint8_t uart_tx_buffer[UART_TX_BUF_SIZE];
+
+static volatile uint16_t uart_tx_head = 0;
+static volatile uint16_t uart_tx_tail = 0;
+static volatile uint8_t uart_tx_busy = 0;
+
+static uint16_t current_transmit_length = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -171,6 +183,9 @@ void Speaker_Beep(uint32_t duration_ms);
 void fan_rotating(uint32_t duration_ms);
 void BME280_Init(void);
 void fan_stop(void);
+//void DMATransferComplete(DMA_HandleTypeDef *hdma);
+int uart_tx_enqueue(const uint8_t* data, uint16_t len);
+void uart_start_tx_dma(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -215,7 +230,7 @@ int main(void)
   MX_TIM1_Init();
   /* USER CODE BEGIN 2 */
   BME280_Config(OSRS_2, OSRS_16, OSRS_1, MODE_NORMAL, T_SB_0p5, IIR_16);
-
+//  HAL_DMA_RegisterCallback(&hdma_usart2_tx, HAL_DMA_XFER_CPLT_CB_ID, &DMATransferComplete);
   /* USER CODE END 2 */
 
   /* Init scheduler */
@@ -223,6 +238,9 @@ int main(void)
   /* Create the mutex(es) */
   /* creation of xUARTMutex */
   xUARTMutexHandle = osMutexNew(&xUARTMutex_attributes);
+
+  /* creation of xFANMutex */
+  xFANMutexHandle = osMutexNew(&xFANMutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -382,7 +400,7 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = ENABLE;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
   {
@@ -612,12 +630,12 @@ static void MX_DMA_Init(void)
 {
 
   /* DMA controller clock enable */
-  __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
 
   /* DMA interrupt init */
-  /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+  /* DMA1_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream6_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream6_IRQn);
 
 }
 
@@ -643,7 +661,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOE, GPIO_PIN_8|GPIO_PIN_12|GPIO_PIN_14, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_14, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PE8 PE12 PE14 */
   GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_12|GPIO_PIN_14;
@@ -652,8 +670,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PD12 PD14 */
-  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_14;
+  /*Configure GPIO pins : PD12 PD13 PD14 */
+  GPIO_InitStruct.Pin = GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -664,6 +682,40 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+int uart_tx_enqueue(const uint8_t* data, uint16_t len) {
+    uint16_t next_head;
+    for (uint16_t i = 0; i < len; i++) {
+        next_head = (uart_tx_head + 1) % UART_TX_BUF_SIZE;
+        if (next_head == uart_tx_tail) {
+            // Bafer pun
+            return -1;
+        }
+        uart_tx_buffer[uart_tx_head] = data[i];
+        uart_tx_head = next_head;
+    }
+    return 0;
+}
+
+void uart_start_tx_dma(void) {
+    if (uart_tx_busy) return; // već radi
+
+    if (uart_tx_head == uart_tx_tail) {
+        // Bafer prazan
+        return;
+    }
+
+    uart_tx_busy = 1;
+
+    if (uart_tx_head > uart_tx_tail) {
+        current_transmit_length = uart_tx_head - uart_tx_tail;
+    } else {
+        current_transmit_length = UART_TX_BUF_SIZE - uart_tx_tail;
+    }
+
+    HAL_UART_Transmit_DMA(&huart2, &uart_tx_buffer[uart_tx_tail], current_transmit_length);
+}
+
 void Speaker_Beep(uint32_t duration_ms)
 {
     htim2.Instance->CCR2 = 470;
@@ -696,6 +748,20 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         HAL_UART_Receive_IT(&huart2, &rx_buff, 1);
     }
 }
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart->Instance == USART2) {
+        uart_tx_tail = (uart_tx_tail + current_transmit_length) % UART_TX_BUF_SIZE;
+
+        if (uart_tx_tail != uart_tx_head) {
+            uart_tx_busy = 0;
+            uart_start_tx_dma();
+        } else {
+            uart_tx_busy = 0;
+        }
+    }
+}
+
+
 
 /* USER CODE END 4 */
 
@@ -709,37 +775,37 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void co_measure_task(void *argument)
 {
   /* USER CODE BEGIN 5 */
+	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_13, GPIO_PIN_SET);
 	uint32_t adc_value;
 	const float Vcc = 5.0f;
 	const float RL = 10000.0f;
 	WeatherData_t latestWeather = { .temperature = 25.0f, .humidity = 52.0f };
-	// Kalibracija R0 (izvodi se jednom na početku)
+// Kalibracija R0 za trenutnu temp i hum
 //	osDelay(pdMS_TO_TICKS(1000));
-	float R0_i = 0;
 	float Vout;
 	float Rs, T, H;
-	for(int i=0; i<10; i++){
-		HAL_ADC_Start(&hadc1);
-		if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
-			adc_value = HAL_ADC_GetValue(&hadc1);
-		}
-		HAL_ADC_Stop(&hadc1);
-
-		Vout = (adc_value * Vcc) / 4095.0f;
-		Rs = ((Vcc - Vout) * RL) / Vout;
-
-		osMessageQueueGet(queue_r0Handle, &latestWeather, NULL, osWaitForever);
-		T = latestWeather.temperature;
-		H = latestWeather.humidity;
-		float R0 = Rs / (-0.0122f * T - 0.00609f * H + 1.7086f);
-		R0_i = R0_i + R0;
+	osDelay(pdMS_TO_TICKS(100));
+	osMessageQueueGet(queue_r0Handle, &latestWeather, NULL, osWaitForever);
+	T = latestWeather.temperature;
+	H = latestWeather.humidity;
+	HAL_ADC_Start(&hadc1);
+	if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
+		adc_value = HAL_ADC_GetValue(&hadc1);
 	}
-	R0_i = R0_i / 10;
+	HAL_ADC_Stop(&hadc1);
+
+	Vout = (adc_value * Vcc) / 4095.0f;
+	Rs = ((Vcc - Vout) * RL) / Vout;
+
+
+	float R0 = Rs / (-0.0122f * T - 0.00609f * H + 1.7086f);
+
 	char msg[64];
-	snprintf(msg, sizeof(msg), "R0 = %.2f\r\n (T=%.1fC H=%.1f%%)", R0_i, T, H);
+	snprintf(msg, sizeof(msg), "R0 = %.2f\r\n (T=%.1fC H=%.1f%%)", R0, T, H);
 	osMutexAcquire(xUARTMutexHandle, osWaitForever);
-	HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
+	HAL_UART_Transmit_DMA(&huart2, (uint8_t*)msg, strlen(msg));
 	osMutexRelease(xUARTMutexHandle);
+
 
 	// Petlja za merenje CO
 	for (;;) {
@@ -749,18 +815,14 @@ void co_measure_task(void *argument)
 			Vout = (adc_value * Vcc) / 4095.0f;
 			Rs = ((Vcc - Vout) * RL) / Vout;
 
-			float ratio = Rs / R0_i;
+			float ratio = Rs / R0;
 			float co_ppm = 19.709f * powf(ratio, -0.652f);
 
-//			snprintf(msg, sizeof(msg), "CO: %.1f ppm \r\n", co_ppm);
-//			osMutexAcquire(xUARTMutexHandle, osWaitForever);
-//			HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 100);
-//			osMutexRelease(xUARTMutexHandle);
-//
+
 			osMessageQueuePut(queue_coHandle, &co_ppm, 0, pdMS_TO_TICKS(100));
 			if (co_ppm > 30.0f) {
 //			    HAL_UART_Transmit(&huart2, (uint8_t*)"Speaker Semafor RELEASE\r\n", 26, 100);
-			    xTaskNotifyGive(FanTaskHandle);
+				xTaskNotifyGive(FanTaskHandle);
 				osSemaphoreRelease(xSpeakerSemHandle);
 			}
 		}
@@ -782,23 +844,14 @@ void co_measure_task(void *argument)
 void weather_task(void *argument)
 {
   /* USER CODE BEGIN weather_task */
-//	char uart_buf[128];
-//	int uart_buf_len;
+
 	for (;;) {
 		BME280_Measure();
 		osMessageQueuePut(queue_r0Handle, &data, 0, pdMS_TO_TICKS(100));
 
-//		uart_buf_len = snprintf(uart_buf, sizeof(uart_buf),
-//				      "Temp: %.2f C, Press: %.2f hPa, Hum: %.2f %%\r\n",
-//				      data.temperature, Pressure / 100.0f, data.humidity);
-//		osMutexAcquire(xUARTMutexHandle, osWaitForever);
-//		HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, uart_buf_len, HAL_MAX_DELAY);
-//		osMutexRelease(xUARTMutexHandle);
+
 		osMessageQueuePut(queue_prHandle, &Pressure, 0, pdMS_TO_TICKS(100));
 		if(Pressure>1020000	){
-//			osMutexAcquire(xUARTMutexHandle, osWaitForever);
-//		    HAL_UART_Transmit(&huart2, (uint8_t*)"Speaker Semafor PRESSURE\r\n", 27, 100);
-//			osMutexRelease(xUARTMutexHandle);
 		    osSemaphoreRelease(xSpeakerSemHandle);
 		}
 		xTaskNotify(WatchdogTaskHandle, 0x02, eSetBits);
@@ -849,7 +902,6 @@ void fan_task(void *argument)
 	  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 //	  HAL_UART_Transmit(&huart2, (uint8_t*)"FAN\r\n", 5, 100);
 	  if (fan_continuous_mode){
-		  // Uključi ventilator i čekaj dok se fan_continuous_mode ne resetuje na 0
 		  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 19000);
 		  while (fan_continuous_mode)
 		  {
@@ -859,9 +911,13 @@ void fan_task(void *argument)
 			HAL_UART_Transmit(&huart2, (uint8_t*)"F\r\n", 3, 100);
 			osMutexRelease(xUARTMutexHandle);
 		  }
+		  osMutexAcquire(xFANMutexHandle, osWaitForever);
 		  fan_stop();
+		  osMutexRelease(xFANMutexHandle);
 	  }else{
+		  osMutexAcquire(xFANMutexHandle, osWaitForever);
 		  fan_rotating(1000);
+		  osMutexRelease(xFANMutexHandle);
 	  }
 
 
@@ -887,7 +943,9 @@ void uart_command_task(void *argument)
 		if(osMessageQueueGet(uartCommandQueueHandle, &fan_state, NULL, osWaitForever) == osOK){
 			if (fan_state == '0') {
 			    fan_continuous_mode = 0;
+				osMutexAcquire(xFANMutexHandle, osWaitForever);
 			    fan_stop();
+			    osMutexRelease(xFANMutexHandle);
 			}
 			else if (fan_state == '1') {
 			    fan_continuous_mode = 1;
@@ -896,7 +954,9 @@ void uart_command_task(void *argument)
 			else if (fan_state >= '2' && fan_state <= '9') {
 			    fan_continuous_mode = 0;
 			    uint32_t duration = (fan_state - '0') * 1000;
-			    fan_rotating(duration);
+				osMutexAcquire(xFANMutexHandle, osWaitForever);
+				fan_rotating(duration);
+				osMutexRelease(xFANMutexHandle);
 			}
 		}
 
@@ -921,16 +981,23 @@ void uart_display_task(void *argument)
   /* Infinite loop */
   for(;;)
   {
+
 	  if(osMessageQueueGet(queue_coHandle, &co_ppm, NULL, osWaitForever) == osOK){
+//		  while (huart2.gState != HAL_UART_STATE_READY) osDelay(1);
 		  snprintf(msg, sizeof(msg), "UART: Co: %.1f ppm\r\n", co_ppm);
 		  osMutexAcquire(xUARTMutexHandle, osWaitForever);
-		  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), pdMS_TO_TICKS(100));
+		  uart_tx_enqueue((uint8_t*)msg, strlen(msg));
+		  uart_start_tx_dma();
+//		  HAL_UART_Transmit_DMA(&huart2, (uint8_t*)msg, strlen(msg));
 		  osMutexRelease(xUARTMutexHandle);
 	  }
 	  if(osMessageQueueGet(queue_prHandle, &Pressure, NULL, osWaitForever) == osOK){
+		  while (huart2.gState != HAL_UART_STATE_READY) osDelay(1);
 		  snprintf(msg, sizeof(msg), "UART: P: %.2f hPa\r\n", Pressure);
 		  osMutexAcquire(xUARTMutexHandle, osWaitForever);
-		  HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), pdMS_TO_TICKS(100));
+//		  HAL_UART_Transmit_DMA(&huart2, (uint8_t*)msg, strlen(msg));
+		  uart_tx_enqueue((uint8_t*)msg, strlen(msg));
+		  uart_start_tx_dma();
 		  osMutexRelease(xUARTMutexHandle);
 	  }
 	  if (osMessageQueueGet(queue_watchdogHandle, &err, NULL, pdMS_TO_TICKS(100)) == osOK){
@@ -948,10 +1015,16 @@ void uart_display_task(void *argument)
 				snprintf(msg, sizeof(msg), "[WDTG] Greska u CO mjerenju\r\n");
 				break;
 		}
-		 HAL_UART_Transmit(&huart2, (uint8_t *)msg, strlen(msg), 100);
+		  osMutexAcquire(xUARTMutexHandle, osWaitForever);
+		  while (huart2.gState != HAL_UART_STATE_READY) osDelay(1);
+//		  HAL_UART_Transmit_DMA(&huart2, (uint8_t*)msg, strlen(msg));
+		  uart_tx_enqueue((uint8_t*)msg, strlen(msg));
+		  uart_start_tx_dma();
+		  osMutexRelease(xUARTMutexHandle);
 	  }
+
 	  xTaskNotify(WatchdogTaskHandle, 0x04, eSetBits);  // uart task
-	  osDelay(pdMS_TO_TICKS(500));
+	  osDelay(pdMS_TO_TICKS(300));
   }
   /* USER CODE END uart_display_task */
 }

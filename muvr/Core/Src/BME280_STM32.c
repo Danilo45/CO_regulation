@@ -14,7 +14,6 @@
 #include <stdio.h>
 
 extern I2C_HandleTypeDef hi2c3;
-extern UART_HandleTypeDef huart2;
 
 #define BME280_I2C &hi2c3
 
